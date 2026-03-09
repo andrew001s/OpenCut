@@ -1,7 +1,7 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { useRouter } from "next/navigation";
+import { useEffect, useMemo, useState } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
 import { Loader2 } from "lucide-react";
 import { useEditor } from "@/hooks/use-editor";
 import {
@@ -19,10 +19,29 @@ interface EditorProviderProps {
 export function EditorProvider({ projectId, children }: EditorProviderProps) {
 	const editor = useEditor();
 	const router = useRouter();
+	const searchParams = useSearchParams();
 	const [isLoading, setIsLoading] = useState(true);
 	const [error, setError] = useState<string | null>(null);
 	const { disableKeybindings, enableKeybindings } = useKeybindingDisabler();
 	const activeProject = editor.project.getActiveOrNull();
+	const newProjectNameFromQuery = useMemo(() => {
+		const rawName =
+			searchParams.get("projectName") ??
+			searchParams.get("project_name") ??
+			searchParams.get("name");
+		const normalizedName = rawName?.trim();
+		return normalizedName && normalizedName.length > 0
+			? normalizedName
+			: "Untitled Project";
+	}, [searchParams]);
+	const forwardedQueryForNewProject = useMemo(() => {
+		const params = new URLSearchParams(searchParams.toString());
+		params.delete("projectName");
+		params.delete("project_name");
+		params.delete("name");
+		const serialized = params.toString();
+		return serialized.length > 0 ? `?${serialized}` : "";
+	}, [searchParams]);
 
 	useEffect(() => {
 		if (isLoading) {
@@ -55,9 +74,11 @@ export function EditorProvider({ projectId, children }: EditorProviderProps) {
 				if (isNotFound) {
 					try {
 						const newProjectId = await editor.project.createNewProject({
-							name: "Untitled Project",
+							name: newProjectNameFromQuery,
 						});
-						router.replace(`/editor/${newProjectId}`);
+						router.replace(
+							`/editor/${newProjectId}${forwardedQueryForNewProject}`,
+						);
 					} catch (_createErr) {
 						setError("Failed to create project");
 						setIsLoading(false);
@@ -76,7 +97,13 @@ export function EditorProvider({ projectId, children }: EditorProviderProps) {
 		return () => {
 			cancelled = true;
 		};
-	}, [projectId, editor, router]);
+	}, [
+		projectId,
+		editor,
+		router,
+		newProjectNameFromQuery,
+		forwardedQueryForNewProject,
+	]);
 
 	if (error) {
 		return (

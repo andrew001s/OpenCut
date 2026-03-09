@@ -8,6 +8,46 @@ export interface ProcessedMediaAsset extends Omit<MediaAsset, "id"> {}
 
 const THUMBNAIL_MAX_WIDTH = 1280;
 const THUMBNAIL_MAX_HEIGHT = 720;
+const SUPPORTED_MEDIA_TYPE_PREFIXES = ["image/", "video/", "audio/"] as const;
+const MEDIA_EXTENSION_TO_MIME: Record<string, string> = {
+	mp4: "video/mp4",
+	m4v: "video/mp4",
+	mov: "video/quicktime",
+	webm: "video/webm",
+	mkv: "video/x-matroska",
+	mp3: "audio/mpeg",
+	m4a: "audio/mp4",
+	wav: "audio/wav",
+	ogg: "audio/ogg",
+	flac: "audio/flac",
+	aac: "audio/aac",
+	jpg: "image/jpeg",
+	jpeg: "image/jpeg",
+	png: "image/png",
+	webp: "image/webp",
+	gif: "image/gif",
+	svg: "image/svg+xml",
+	avif: "image/avif",
+};
+
+const MEDIA_MIME_TO_EXTENSION: Record<string, string> = {
+	"video/mp4": "mp4",
+	"video/quicktime": "mov",
+	"video/webm": "webm",
+	"video/x-matroska": "mkv",
+	"audio/mpeg": "mp3",
+	"audio/mp4": "m4a",
+	"audio/wav": "wav",
+	"audio/ogg": "ogg",
+	"audio/flac": "flac",
+	"audio/aac": "aac",
+	"image/jpeg": "jpg",
+	"image/png": "png",
+	"image/webp": "webp",
+	"image/gif": "gif",
+	"image/svg+xml": "svg",
+	"image/avif": "avif",
+};
 
 const getThumbnailSize = ({
 	width,
@@ -145,6 +185,149 @@ export async function generateImageThumbnail({
 	});
 }
 
+function isSupportedMediaMimeType(mimeType: string): boolean {
+	return SUPPORTED_MEDIA_TYPE_PREFIXES.some((prefix) =>
+		mimeType.startsWith(prefix),
+	);
+}
+
+function getExtensionFromPathname(pathname: string): string | null {
+	const fileName = pathname.split("/").pop();
+	if (!fileName || !fileName.includes(".")) return null;
+	const extension = fileName.split(".").pop()?.toLowerCase();
+	return extension || null;
+}
+
+function getFileNameFromContentDisposition(
+	contentDisposition: string | null,
+): string | null {
+	if (!contentDisposition) return null;
+
+	const utf8FileNameMatch = contentDisposition.match(
+		/filename\*=UTF-8''([^;]+)/i,
+	);
+	if (utf8FileNameMatch?.[1]) {
+		return decodeURIComponent(utf8FileNameMatch[1].trim().replace(/["']/g, ""));
+	}
+
+	const fileNameMatch = contentDisposition.match(/filename="?([^";]+)"?/i);
+	if (fileNameMatch?.[1]) {
+		return decodeURIComponent(fileNameMatch[1].trim());
+	}
+
+	return null;
+}
+
+function getMediaMimeTypeFromUrl({
+	url,
+	contentType,
+	fileNameFromHeaders,
+}: {
+	url: URL;
+	contentType: string;
+	fileNameFromHeaders: string | null;
+}): string | null {
+	if (contentType && isSupportedMediaMimeType(contentType)) {
+		return contentType;
+	}
+
+	const headerFileExtension = fileNameFromHeaders
+		? getExtensionFromPathname(fileNameFromHeaders)
+		: null;
+	if (headerFileExtension) {
+		return MEDIA_EXTENSION_TO_MIME[headerFileExtension] ?? null;
+	}
+
+	const extension = getExtensionFromPathname(url.pathname);
+	if (!extension) return null;
+	return MEDIA_EXTENSION_TO_MIME[extension] ?? null;
+}
+
+function getMediaFileName({
+	url,
+	mimeType,
+	fileNameFromHeaders,
+}: {
+	url: URL;
+	mimeType: string;
+	fileNameFromHeaders: string | null;
+}): string {
+	if (fileNameFromHeaders) {
+		return fileNameFromHeaders;
+	}
+
+	const rawFileName = url.pathname.split("/").pop();
+	const decodedFileName = rawFileName ? decodeURIComponent(rawFileName) : "";
+	const hasExtension = decodedFileName.includes(".");
+
+	if (decodedFileName && hasExtension) {
+		return decodedFileName;
+	}
+
+	const extension =
+		MEDIA_MIME_TO_EXTENSION[mimeType] ?? mimeType.split("/")[1] ?? "bin";
+
+	if (!decodedFileName) {
+		return `remote-media.${extension}`;
+	}
+
+	return `${decodedFileName}.${extension}`;
+}
+
+export async function fetchMediaFileFromUrl({
+	url,
+}: {
+	url: string;
+}): Promise<File> {
+	let parsedUrl: URL;
+	try {
+		parsedUrl = new URL(url.trim());
+	} catch {
+		throw new Error("Please enter a valid URL");
+	}
+
+	const response = await fetch(parsedUrl.toString());
+	if (!response.ok) {
+		throw new Error(`Could not download file (${response.status})`);
+	}
+
+	const blob = await response.blob();
+	if (blob.size === 0) {
+		throw new Error("Downloaded file is empty");
+	}
+
+	const contentType = (
+		response.headers.get("content-type") ??
+		blob.type ??
+		""
+	)
+		.split(";")[0]
+		.trim()
+		.toLowerCase();
+	const fileNameFromHeaders = getFileNameFromContentDisposition(
+		response.headers.get("content-disposition"),
+	);
+	const mimeType = getMediaMimeTypeFromUrl({
+		url: parsedUrl,
+		contentType,
+		fileNameFromHeaders,
+	});
+
+	if (!mimeType) {
+		throw new Error("URL must point to an image, video, or audio file");
+	}
+
+	const fileName = getMediaFileName({
+		url: parsedUrl,
+		mimeType,
+		fileNameFromHeaders,
+	});
+	return new File([blob], fileName, {
+		type: mimeType,
+		lastModified: Date.now(),
+	});
+}
+
 export async function processMediaAssets({
 	files,
 	onProgress,
@@ -195,6 +378,19 @@ export async function processMediaAssets({
 					});
 				} catch (error) {
 					console.warn("Video processing failed", error);
+					try {
+						const fallbackMetadata = await getVideoMetadataFromElement({
+							file,
+						});
+						duration = fallbackMetadata.duration;
+						width = fallbackMetadata.width;
+						height = fallbackMetadata.height;
+					} catch (fallbackError) {
+						console.warn(
+							"Video metadata fallback failed",
+							fallbackError,
+						);
+					}
 				}
 			} else if (fileType === "audio") {
 				// For audio, we don't set width/height/fps (they'll be undefined)
@@ -278,5 +474,36 @@ const getMediaDuration = ({ file }: { file: File }): Promise<number> => {
 
 		element.src = objectUrl;
 		element.load();
+	});
+};
+
+const getVideoMetadataFromElement = ({
+	file,
+}: {
+	file: File;
+}): Promise<{ duration: number; width: number; height: number }> => {
+	return new Promise((resolve, reject) => {
+		const video = document.createElement("video");
+		const objectUrl = URL.createObjectURL(file);
+		video.preload = "metadata";
+
+		video.addEventListener("loadedmetadata", () => {
+			resolve({
+				duration: video.duration,
+				width: video.videoWidth,
+				height: video.videoHeight,
+			});
+			URL.revokeObjectURL(objectUrl);
+			video.remove();
+		});
+
+		video.addEventListener("error", () => {
+			reject(new Error("Could not load video metadata"));
+			URL.revokeObjectURL(objectUrl);
+			video.remove();
+		});
+
+		video.src = objectUrl;
+		video.load();
 	});
 };
