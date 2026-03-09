@@ -113,17 +113,8 @@ export default function PrivacyPage() {
 					stored locally in your browser using IndexedDB.
 				</p>
 				<p>
-					We use{" "}
-					<a
-						href="https://www.better-auth.com"
-						target="_blank"
-						rel="noopener"
-						className="text-primary hover:underline"
-					>
-						Better Auth
-					</a>{" "}
-					for secure authentication and follow industry-standard security
-					practices.
+					When authentication is enabled, we use industry-standard security
+					practices for account access and session management.
 				</p>
 			</section>
 
